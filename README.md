@@ -4,5 +4,5 @@ Extracts sales, credits, debits, and chargebacks from Visa merchant settlement s
 
 Usage:
 - Create routes.py to declare directory_in and directory_out.
-- Create Establishments.xlsx with establishment numbers and their description.
+- Create Establecimientos.xlsx with establishment numbers and their description (see Establecimientos_example.xlsx).
 - Run main.py.
