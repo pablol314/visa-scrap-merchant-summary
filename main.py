@@ -45,7 +45,8 @@ def _extract_visa():
         df_devolutions = _extract_devol(df, establishment)
         df_sells = _extract_sells(df, establishment)
         df_chargeback = _extract_charg(df, month_settled, establishment)
-        df = pd.concat([df_chargeback, df_accred_and_debits, df_devolutions, df_sells, df_full_discount])
+        df_reverse = _extract_reverse(df, month_settled, establishment)
+        df = pd.concat([df_chargeback, df_reverse, df_accred_and_debits, df_devolutions, df_sells, df_full_discount])
 
         df[0] = establishment_number
 
@@ -68,7 +69,8 @@ def _to_float(data):
     data = str(data)
     # Si data no existe.
     if data:
-        return float(("-" + data.replace("-", "") if "-" in data else data).replace(".", "").replace(",", "."))
+        return float(("-" + data.replace("-", "") if "-" in data else data).replace(".", "").replace(",", ".")
+                     .replace("$", ""))
     else:
         return 0
 
@@ -201,6 +203,25 @@ def _extract_charg(df, month_settled, establishment):
 
     return _complete_columns(pd.DataFrame())
 
+def _extract_reverse(df, month_settled, establishment):
+    match_words = ["Reverso"]
+    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
+    df.reset_index(drop=True, inplace=True)
+
+    reverse_value = 0
+    for i in df.index:
+        df[1][i] = _to_float(df[1][i])
+        reverse_value += df[1][i]
+
+    if not (reverse_value == 0):
+        df = _complete_columns(
+            pd.DataFrame(data=[["Reverso - " + establishment + month_settled, reverse_value]]))
+        df[3] = df[1]
+        df[1] = df[0]
+        return df
+
+    return _complete_columns(pd.DataFrame())
+
 
 def _extract_full_dis(full_discount, month_settled, establishment):
     df = _complete_columns(pd.DataFrame(data=[["Total descuentos - " + establishment + month_settled, full_discount]]))
@@ -225,6 +246,7 @@ def _export_to_excel(list_dfs):
     df.reset_index(drop=True, inplace=True)
     df.to_excel(directory_out +
                 datetime.today().strftime("%d-%m-%Y") + ' Visa.xlsx', sheet_name="Sheet 1")
+    print("Debug")
 
 if __name__ == "__main__":
     _extract_visa()
