@@ -1,57 +1,63 @@
-import itertools
-import pandas as pd
 from tabula import read_pdf
-import glob
 from routes import *
-pd.options.mode.chained_assignment = None
 from datetime import datetime
+import itertools
+import glob
+import re
+import pandas as pd
 import logging
 logging.basicConfig(level=logging.INFO)
-import re
+
+pd.options.mode.chained_assignment = None
 
 list_files = glob.glob(directory_in)
+
+match = re.search(r"\\([^\\]+)\\[^\\]*\.pdf", directory_in)
+name_excel = match.group(1).replace(" ", "_") if match else "default_name"
+
 df_establishments = pd.read_excel("Establecimientos.xlsx")
 
 def _extract_visa():
     logging.info("Beginning extract Visa.")
-    count_files = 0
     visa_df = []
 
     for file in list_files:
         logging.info("Beginning extract {}.".format(file))
-        count_files += 1
 
+        #PDF READER
         month_settled = _read_pdf(file, 1, (318, 98, 347, 406), (120, 180))[0].loc[0, 1]
+
         establishment_number = _read_pdf(file, 1, (144, 348, 268, 507), (455, 506))[0].loc[0, 1]
+
         establishment = _complete_establishment(_complete_columns(pd.DataFrame(data=[[establishment_number]])),
                                                 establishment_number).loc[0, 0] + " "
+
         full_discount = _to_float(_read_pdf(file, 1, (144, 348, 268, 507), (455, 506))[0].loc[4, 0])
 
         even_odd_list = _even_odd_list(len(read_pdf(input_path=file,
                                                     pages="all", encoding="windows-1252", guess=False)))
+
         list_df_odd = _read_pdf(file, even_odd_list[1], (373, 0, 945, 535), (190, 263, 460))
-        list_df_even = _read_pdf(file, even_odd_list[0], (84, 0, 945, 535), (190, 263, 460))
+
+        list_df_even = _read_pdf(file, even_odd_list[0], (84, 0, 945, 535), (190, 263, 460))\
+            if even_odd_list[0] else [_complete_columns(pd.DataFrame())]
 
         list_all_df = list(itertools.chain(*zip(list_df_odd, list_df_even)))
 
-        for df in list_all_df:
-            _complete_columns(df)
+        df = pd.concat(list(map(_complete_columns, list_all_df)))
 
-        df = pd.concat(list_all_df)
-        df.reset_index(drop=True, inplace=True)
-
+        #DATA EXTRACT
         df_full_discount = _extract_full_dis(full_discount, month_settled, establishment)
         df_accred_and_debits = _extract_accred_and_debits(df, establishment)
         df_devolutions = _extract_devol(df, establishment)
         df_sells = _extract_sells(df, establishment)
         df_chargeback = _extract_charg(df, month_settled, establishment)
         df_reverse = _extract_reverse(df, month_settled, establishment)
+
+        #EXPORT
         df = pd.concat([df_chargeback, df_reverse, df_accred_and_debits, df_devolutions, df_sells, df_full_discount])
-
         df[0] = establishment_number
-
         df.columns = ["Establecimiento", "Detalle", "Debe", "Haber"]
-
         df = df.replace("", "No data")
         visa_df.append(df)
 
@@ -65,11 +71,17 @@ def _read_pdf(file, pages, area, columns):
                     pandas_options={"header": None})
 
 
+def _search_string(df, match_words):
+    pattern = re.compile("|".join(match_words))
+    return df.loc[df[0].str.contains(pattern, na=False)]
+
+
 def _to_float(data):
     data = str(data)
-    # Si data no existe.
     if data:
-        return float(("-" + data.replace("-", "") if "-" in data else data).replace(".", "").replace(",", ".")
+        return float(("-" + data.replace("-", "") if "-" in data else data)
+                     .replace(".", "")
+                     .replace(",", ".")
                      .replace("$", ""))
     else:
         return 0
@@ -93,106 +105,73 @@ def _complete_columns(df):
     return df
 
 
-def _move_vertical_column_up(df, column):
-    for i in df.index:
-        if i != (len(df.index) - 1):
-            df[column][i] = (df[column][i + 1])
-    return df
-
-
 def _extract_accred_and_debits(df, establishment):
-    match_words = ["Total del día", "FECHA DE PAGO"]
-    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
+    df = _search_string(df, ["Total del día", "FECHA DE PAGO"])
+
     df[1] = df[0]
-    df.reset_index(drop=True, inplace=True)
-    df = _move_vertical_column_up(df, 3)
+    df[3] = df[3].shift(-1)
 
-    for i in df.index:
-        if not (re.search(r"FECHA DE PAGO\d\d", df[1][i])):
-            df = df.drop(i)
-        else:
-            df[3][i] = _to_float(df[3][i])
-            if df[3][i] < 0:
-                df[2][i] = float(str(df[3][i]).replace("-", ""))
-                df[3][i] = ""
-                df[1][i] = "Debito - " + establishment + (df[1][i])[-5:]
-            elif df[3][i] > 0:
-                df[2][i] = ""
-                df[1][i] = "Acredi - " + establishment + (df[1][i])[-5:]
-            else:
-                df = df.drop(i)
+    df = df.loc[df[1].str.contains("FECHA DE PAGO\d\d", na=False)]
 
-    df.reset_index(drop=True, inplace=True)
+    df = df[(df[3] != 0) & (df[3] != "") & df[3].notna()]
+    df[3] = df[3].apply(_to_float)
+
+    mask = df[3] > 0
+    df.loc[mask, 2] = ""
+    df.loc[mask, 1] = "Acredi - " + establishment + df.loc[mask, 1].str.slice(-5)
+
+    mask_inv = ~mask
+    df.loc[mask_inv, 2] = -df.loc[mask_inv, 3]
+    df.loc[mask_inv, 3] = ""
+    df.loc[mask_inv, 1] = "Debito - " + establishment + df.loc[mask_inv, 1].str.slice(-5)
+
     return df
 
 
 def _extract_devol(df, establishment):
-    match_words = ["Fecha de prese", "Devoluci"]
-    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
-    df.reset_index(drop=True, inplace=True)
-    df = _move_vertical_column_up(df, 1)
+    df = _search_string(df, ["Fecha de prese", "Devoluci"])
 
-    for i in df.index:
-        if not (re.search(r"Fecha", df[0][i])) or pd.isna(df[1][i]):
-            df = df.drop(i)
-        else:
-            df[3][i] = float(str(_to_float(df[1][i])).replace("-", ""))
-            df[1][i] = "Devolucion - " + establishment + (df[0][i])[-5:]
-            df[2][i] = ""
+    df[1] = df[1].shift(-1)
 
-    df.reset_index(drop=True, inplace=True)
+    df = df[(df[1] != 0) & (df[1] != "") & df[1].notna()]
+    df[1] = df[1].apply(_to_float)
+
+    df[3] = -df[1]
+    df[1] = "Devolucion - " + establishment + df[0].str[-5:]
+    df[2] = ""
+
     return df
 
 
 def _extract_sells(df, establishment):
-    match_words = ["Ventas en", "Venta en", "Fecha de presenta"]
-    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
+    df = _search_string(df, ["Ventas en", "Venta en", "Fecha de presenta"])
     df.reset_index(drop=True, inplace=True)
 
-    _len = len(df.index) - 1
-    for i in df.index:
-        if not (i == _len):
-            if (re.search(r"\d Venta", df[0][i])) and pd.isna(df[1][i]):
-                df = df.drop(i)
-            elif not (re.search(r"\d Venta", df[0][i])):
-                if not ("Venta" in str(df[0][i + 1])):
-                    df = df.drop(i)
-        elif not (re.search(r"\d Venta", df[0][i])):
-            df = df.drop(i)
+    df[1] = df[1].apply(_to_float)
 
-    df.reset_index(drop=True, inplace=True)
+    fechas = []
+    ventas = []
 
-    sell_amount = 0
-    sells = []
-    sells_detail = []
-    _len = len(df.index) - 1
-    for i in df.index:
-        if re.search(r"Fecha", df[0][i]):
-            df[0][i] = "Ventas - " + establishment + str(df[0][i])[-5:]
-            sells_detail.append(df[0][i])
-            if sell_amount != 0:
-                sells.append(sell_amount)
-            sell_amount = 0
-        elif re.search(r"Venta", df[0][i]):
-            sell_amount += _to_float(df[1][i])
-            if i == _len:
-                sells.append(sell_amount)
+    for i, fila in df.iterrows():
+        if "Fecha" in str(fila[0]):
+            fechas.append(i)
+            ventas.append(0)
+        elif "Venta" in str(fila[0]):
+            ventas[-1] += float(fila[1])
 
-    df = _complete_columns(pd.DataFrame(list(zip(sells_detail, sells))))
+    df = _complete_columns(pd.DataFrame(list(zip(df.loc[fechas][0], ventas)), columns=[0, 1]))
+    df = df.drop(df[df[1] == 0].index)
+    df[0] = "Ventas - " + establishment + df[0]
+
     df[2] = df[1]
     df[1] = df[0]
     return df
 
 
 def _extract_charg(df, month_settled, establishment):
-    match_words = ["Contra"]
-    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
-    df.reset_index(drop=True, inplace=True)
+    df = _search_string(df, ["Contra"])
 
-    chargeback_value = 0
-    for i in df.index:
-        df[1][i] = _to_float(df[1][i]) * -1
-        chargeback_value += df[1][i]
+    chargeback_value = -df[1].apply(_to_float).sum()
 
     if not (chargeback_value == 0):
         df = _complete_columns(
@@ -203,15 +182,11 @@ def _extract_charg(df, month_settled, establishment):
 
     return _complete_columns(pd.DataFrame())
 
-def _extract_reverse(df, month_settled, establishment):
-    match_words = ["Reverso"]
-    df = df.loc[df[0].str.contains("|".join(match_words), na=False)]
-    df.reset_index(drop=True, inplace=True)
 
-    reverse_value = 0
-    for i in df.index:
-        df[1][i] = _to_float(df[1][i])
-        reverse_value += df[1][i]
+def _extract_reverse(df, month_settled, establishment):
+    df = _search_string(df, ["Reverso"])
+
+    reverse_value = -df[1].apply(_to_float).sum()
 
     if not (reverse_value == 0):
         df = _complete_columns(
@@ -231,12 +206,10 @@ def _extract_full_dis(full_discount, month_settled, establishment):
 
 
 def _complete_establishment(df, establishment):
-    find = False
-    for i in df_establishments.index:
-        if str(establishment) == str("00" + str(df_establishments["Establecimiento"][i])).replace(".0", ""):
-            df[0] = str(df_establishments["Nombre"][i])
-            find = True
-    if not (find):
+    mask = df_establishments["Establecimiento"].astype(str) == establishment[2:]
+    if mask.any():
+        df[0] = df_establishments.loc[mask, "Nombre"].iloc[0]
+    else:
         df[0] = "No registrado"
     return df
 
@@ -245,8 +218,7 @@ def _export_to_excel(list_dfs):
     df = pd.concat(list_dfs)
     df.reset_index(drop=True, inplace=True)
     df.to_excel(directory_out +
-                datetime.today().strftime("%d-%m-%Y") + ' Visa.xlsx', sheet_name="Sheet 1")
-    print("Debug")
+                datetime.today().strftime("%d-%m-%Y") + "_" + name_excel +".xlsx", sheet_name="Sheet 1")
 
 if __name__ == "__main__":
     _extract_visa()
